@@ -1,12 +1,93 @@
-# 虚拟环境
-.rag_venv/
-venv/
-
-# Python缓存
+# ========== Python ==========
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
 
-# 数据文件
-*.json
+# ========== 虚拟环境 ==========
+.venv/
+venv/
+env/
+ENV/
+.rag_venv/
+
+# ========== IDE和编辑器 ==========
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ========== 系统文件 ==========
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ========== 数据文件（不上传） ==========
+data/raw/medical_questions.json
+data/raw/medical_corpus.json
 *.xlsx
 *.csv
+*.json
+*.db
+*.sqlite3
+
+# ========== 临时文件 ==========
+temp/
+tmp/
+*.tmp
+*.temp
+
+# ========== 日志文件 ==========
+*.log
+logs/
+
+# ========== 特定文件 ==========
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.secrets/
+
+# ========== 可执行文件 ==========
+*.exe
+*.msi
+*.bat
+Docker Desktop Installer.exe
+python-3.9.13-amd64.exe
+
+# ========== Docker ==========
+docker-compose.override.yml
+
+# ========== 文档文件（可以上传小的，排除大的） ==========
+*.doc
+*.docx
+!README.md
+
+# ========== 其他 ==========
+nul
+volumes/
