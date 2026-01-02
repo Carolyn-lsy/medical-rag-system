@@ -1,0 +1,12 @@
+# 虚拟环境
+.rag_venv/
+venv/
+
+# Python缓存
+__pycache__/
+*.pyc
+
+# 数据文件
+*.json
+*.xlsx
+*.csv
