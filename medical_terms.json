@@ -1,0 +1,48 @@
+{
+  "症状": {
+    "头痛": ["headache", "cephalalgia"],
+    "胃疼": ["stomachache", "stomach pain", "gastralgia"],
+    "发烧": ["fever", "pyrexia"],
+    "咳嗽": ["cough", "tussis"],
+    "腹泻": ["diarrhea", "diarrhoea"],
+    "呕吐": ["vomit", "emesis", "throw up"],
+    "胸闷": ["chest tightness", "chest distress"],
+    "头晕": ["dizziness", "vertigo"],
+    "乏力": ["fatigue", "weakness", "tiredness"],
+    "皮疹": ["rash", "skin rash"]
+  },
+  "疾病": {
+    "糖尿病": ["diabetes", "diabetes mellitus"],
+    "高血压": ["hypertension", "high blood pressure"],
+    "感冒": ["cold", "common cold"],
+    "流感": ["flu", "influenza"],
+    "肺炎": ["pneumonia"],
+    "胃炎": ["gastritis", "stomach inflammation"],
+    "心脏病": ["heart disease", "cardiac disease"],
+    "癌症": ["cancer", "carcinoma", "tumor"],
+    "哮喘": ["asthma"],
+    "关节炎": ["arthritis"]
+  },
+  "身体部位": {
+    "胃": ["stomach", "gastric"],
+    "心脏": ["heart", "cardiac"],
+    "肺": ["lung", "pulmonary"],
+    "肝脏": ["liver", "hepatic"],
+    "肾脏": ["kidney", "renal"],
+    "皮肤": ["skin", "dermal"],
+    "眼睛": ["eye", "ocular"],
+    "耳朵": ["ear", "otic"],
+    "鼻子": ["nose", "nasal"],
+    "喉咙": ["throat", "pharyngeal"]
+  },
+  "治疗": {
+    "手术": ["surgery", "operation"],
+    "药物治疗": ["medication", "drug therapy"],
+    "化疗": ["chemotherapy"],
+    "放疗": ["radiotherapy", "radiation therapy"],
+    "物理治疗": ["physical therapy", "physiotherapy"],
+    "检查": ["examination", "check-up"],
+    "诊断": ["diagnosis", "diagnostic"],
+    "预防": ["prevention", "preventive"]
+  }
+}

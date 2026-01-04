@@ -1,624 +1,702 @@
-# flask_app.py - 医疗RAG系统（中英文双查询版）
+# flask_app.py - 优化版，避免translate库卡顿
 from flask import Flask, render_template, request, jsonify, send_file
 import json
 import pandas as pd
 from pathlib import Path
 import os
 import tempfile
-from datetime import datetime
+import random
 import re
+from collections import defaultdict
+import hashlib
+import threading
+import queue
 
 app = Flask(__name__)
 
-# ========== 医疗术语词典（双语版） ==========
-MEDICAL_TERMS = {
-    "symptoms": {
-        "头痛": ["headache", "cephalalgia"],
-        "胃疼": ["stomachache", "stomach pain", "gastralgia", "abdominal pain"],
-        "发烧": ["fever", "pyrexia"],
-        "咳嗽": ["cough", "tussis"],
-        "腹泻": ["diarrhea", "diarrhoea"],
-        "呕吐": ["vomit", "emesis", "throw up"],
-        "胸闷": ["chest tightness", "chest distress"],
-        "头晕": ["dizziness", "vertigo"],
-        "乏力": ["fatigue", "weakness", "tiredness"],
-        "皮疹": ["rash", "skin rash"],
-        "疼痛": ["pain", "ache", "soreness"],
-        "发炎": ["inflammation", "swelling"],
-        "恶心": ["nausea", "sick"],
-        "呼吸困难": ["difficulty breathing", "dyspnea"],
-        "心悸": ["palpitation", "heart palpitations"]
-    },
-    "diseases": {
-        "糖尿病": ["diabetes", "diabetes mellitus"],
-        "高血压": ["hypertension", "high blood pressure"],
-        "感冒": ["cold", "common cold"],
-        "流感": ["flu", "influenza"],
-        "肺炎": ["pneumonia"],
-        "胃炎": ["gastritis", "stomach inflammation"],
-        "心脏病": ["heart disease", "cardiac disease"],
-        "癌症": ["cancer", "carcinoma", "tumor"],
-        "哮喘": ["ashtma"],
-        "关节炎": ["arthritis"],
-        "皮肤癌": ["skin cancer", "basal cell carcinoma", "squamous cell carcinoma"],
-        "冠心病": ["coronary heart disease", "coronary artery disease"],
-        "中风": ["stroke", "cerebral infarction"],
-        "肝炎": ["hepatitis"],
-        "肾炎": ["nephritis"]
-    },
-    "body_parts": {
-        "胃": ["stomach", "gastric"],
-        "心脏": ["heart", "cardiac"],
-        "肺": ["lung", "pulmonary"],
-        "肝脏": ["liver", "hepatic"],
-        "肾脏": ["kidney", "renal"],
-        "皮肤": ["skin", "dermal"],
-        "眼睛": ["eye", "ocular"],
-        "耳朵": ["ear", "otic"],
-        "鼻子": ["nose", "nasal"],
-        "喉咙": ["throat", "pharyngeal"]
-    },
-    "treatments": {
-        "手术": ["surgery", "operation"],
-        "药物治疗": ["medication", "drug therapy"],
-        "化疗": ["chemotherapy"],
-        "放疗": ["radiotherapy", "radiation therapy"],
-        "物理治疗": ["physical therapy", "physiotherapy"],
-        "检查": ["examination", "check-up"],
-        "诊断": ["diagnosis", "diagnostic"],
-        "预防": ["prevention", "preventive"]
-    }
-}
+# ========== 配置路径 ==========
+BASE_DIR = Path(__file__).parent.absolute()
+CORPUS_PATH = BASE_DIR / "data" / "raw" / "medical_corpus.json"
+QUESTIONS_PATH = BASE_DIR / "data" / "raw" / "medical_questions.json"
 
-# ========== 双语医疗知识库 ==========
-BILINGUAL_KNOWLEDGE_BASE = {
-    "diabetes": {
-        "title_en": "Diabetes Information",
-        "title_cn": "糖尿病信息",
-        "content_en": "Diabetes is a chronic metabolic disorder characterized by high blood sugar levels over a prolonged period. Common symptoms include increased thirst (polydipsia), frequent urination (polyuria), constant hunger (polyphagia), and unexplained weight loss. Long-term complications include cardiovascular disease, stroke, chronic kidney disease, foot ulcers, and damage to the eyes. Management involves lifestyle changes (diet and exercise), blood sugar monitoring, and sometimes insulin or other medications.",
-        "content_cn": "糖尿病是一种慢性代谢紊乱疾病，特征是长期血糖水平升高。常见症状包括多饮、多尿、多食和不明原因的体重减轻。长期并发症包括心血管疾病、中风、慢性肾病、足部溃疡和眼睛损伤。管理涉及生活方式改变（饮食和运动）、血糖监测，有时需要胰岛素或其他药物。",
-        "keywords": ["diabetes", "blood sugar", "insulin", "糖尿病", "血糖", "胰岛素"]
-    },
-    "hypertension": {
-        "title_en": "Hypertension Prevention",
-        "title_cn": "高血压预防",
-        "content_en": "Hypertension (high blood pressure) is a condition in which the force of blood against artery walls is too high. Normal blood pressure is below 120/80 mmHg. Prevention strategies include: 1) Reducing sodium intake, 2) Regular physical activity (30 minutes most days), 3) Maintaining healthy weight, 4) Limiting alcohol consumption, 5) Avoiding tobacco, 6) Managing stress, 7) Eating potassium-rich foods. Untreated hypertension can lead to heart attack, stroke, and kidney damage.",
-        "content_cn": "高血压（血压过高）是血液对动脉壁压力过高的状况。正常血压低于120/80 mmHg。预防策略包括：1) 减少钠摄入，2) 定期体育活动（大多数日子30分钟），3) 保持健康体重，4) 限制饮酒，5) 避免烟草，6) 管理压力，7) 食用富含钾的食物。未治疗的高血压可能导致心脏病发作、中风和肾脏损伤。",
-        "keywords": ["hypertension", "blood pressure", "血压", "高血压", "心血管"]
-    },
-    "common_cold": {
-        "title_en": "Common Cold Symptoms and Treatment",
-        "title_cn": "感冒症状与治疗",
-        "content_en": "The common cold is a viral infection of your upper respiratory tract (nose and throat). Symptoms usually appear 1-3 days after exposure and include: runny or stuffy nose, sore throat, cough, congestion, slight body aches, mild headache, sneezing, low-grade fever. Treatment focuses on symptom relief: rest, drink plenty of fluids, use saline nasal spray, gargle with salt water, use over-the-counter cold medications. Antibiotics are not effective against cold viruses.",
-        "content_cn": "普通感冒是上呼吸道（鼻子和喉咙）的病毒感染。症状通常在暴露后1-3天出现，包括：流鼻涕或鼻塞、喉咙痛、咳嗽、充血、轻微身体疼痛、轻度头痛、打喷嚏、低烧。治疗侧重于缓解症状：休息、多喝水、使用盐水鼻喷雾、盐水漱口、使用非处方感冒药。抗生素对感冒病毒无效。",
-        "keywords": ["cold", "common cold", "virus", "感冒", "病毒", "呼吸道"]
-    },
-    "skin_cancer": {
-        "title_en": "Skin Cancer Basics",
-        "title_cn": "皮肤癌基础知识",
-        "content_en": "Basal cell carcinoma (BCC) is the most common type of skin cancer. It rarely spreads to other parts of the body but can be locally destructive if untreated. Risk factors include: fair skin, history of sunburns, excessive sun exposure, family history, radiation exposure. Warning signs: pearly or waxy bump, flat flesh-colored or brown scar-like lesion, bleeding or scabbing sore that heals and returns. Prevention: use sunscreen (SPF 30+), wear protective clothing, avoid midday sun, don't use tanning beds.",
-        "content_cn": "基底细胞癌是最常见的皮肤癌类型。它很少扩散到身体其他部位，但如果不治疗可能会局部破坏。风险因素包括：白皙皮肤、晒伤史、过度日晒、家族史、辐射暴露。警告信号：珍珠状或蜡状肿块、平坦的肉色或棕色疤痕样病变、出血或结痂的疮口愈合后又复发。预防：使用防晒霜（SPF 30+）、穿防护服、避免中午阳光、不使用日光浴床。",
-        "keywords": ["skin cancer", "basal cell carcinoma", "skin", "cancer", "皮肤癌", "基底细胞", "皮肤", "癌症"]
-    },
-    "headache": {
-        "title_en": "Headache Relief Methods",
-        "title_cn": "头痛缓解方法",
-        "content_en": "For tension headaches: 1) Apply warm or cold compress to forehead and neck, 2) Practice relaxation techniques (deep breathing, meditation), 3) Improve posture, 4) Regular exercise, 5) Adequate sleep, 6) Stay hydrated. For migraine headaches: 1) Rest in quiet, dark room, 2) Apply cold packs, 3) Moderate caffeine, 4) Prescription medications as directed. Seek medical attention if: sudden severe headache, headache after head injury, headache with fever/stiff neck/confusion/seizures.",
-        "content_cn": "对于紧张性头痛：1) 在前额和颈部敷温或冷敷布，2) 练习放松技巧（深呼吸、冥想），3) 改善姿势，4) 定期锻炼，5) 充足睡眠，6) 保持水分。对于偏头痛：1) 在安静、黑暗的房间休息，2) 使用冷敷包，3) 适量咖啡因，4) 按指示使用处方药。如有以下情况请就医：突然剧烈头痛、头部受伤后头痛、伴有发烧/颈部僵硬/意识模糊/癫痫发作的头痛。",
-        "keywords": ["headache", "migraine", "pain relief", "头痛", "偏头痛", "疼痛缓解"]
-    },
-    "stomach_pain": {
-        "title_en": "Stomach Pain Causes and Care",
-        "title_cn": "胃疼原因与护理",
-        "content_en": "Common causes of stomach pain: 1) Indigestion or gas, 2) Gastroenteritis (stomach flu), 3) Constipation, 4) Irritable bowel syndrome, 5) Food poisoning, 6) Lactose intolerance, 7) Ulcers, 8) Gallstones. Home care: 1) Drink clear fluids, 2) Avoid solid food initially, 3) BRAT diet (bananas, rice, applesauce, toast), 4) Avoid dairy, fatty foods, 5) Use heating pad, 6) Rest. See doctor if: severe pain, lasts more than 2 days, fever over 101°F, vomiting blood, black stools.",
-        "content_cn": "胃疼常见原因：1) 消化不良或胀气，2) 胃肠炎（胃流感），3) 便秘，4) 肠易激综合征，5) 食物中毒，6) 乳糖不耐症，7) 溃疡，8) 胆结石。家庭护理：1) 喝清液，2) 最初避免固体食物，3) BRAT饮食（香蕉、米饭、苹果酱、吐司），4) 避免乳制品、油腻食物，5) 使用加热垫，6) 休息。如有以下情况看医生：剧烈疼痛、持续超过2天、发烧超过38.3°C、吐血、黑色粪便。",
-        "keywords": ["stomach pain", "stomachache", "abdominal pain", "indigestion", "胃疼", "胃痛", "腹痛", "消化不良"]
-    }
-}
+# ========== 翻译队列系统（避免卡顿） ==========
+class TranslationQueue:
+    def __init__(self):
+        self.queue = queue.Queue()
+        self.results = {}
+        self.worker_thread = None
+        self.start_worker()
+    
+    def start_worker(self):
+        """启动翻译工作线程"""
+        self.worker_thread = threading.Thread(target=self._translation_worker, daemon=True)
+        self.worker_thread.start()
+        print("✅ 翻译队列工作线程已启动")
+    
+    def _translation_worker(self):
+        """翻译工作线程"""
+        from translate import Translator
+        
+        # 创建translator实例
+        translator_en_to_zh = Translator(to_lang="zh", from_lang="en")
+        translator_zh_to_en = Translator(to_lang="en", from_lang="zh")
+        
+        while True:
+            try:
+                task = self.queue.get()
+                if task is None:  # 停止信号
+                    break
+                    
+                task_id, text, direction = task
+                
+                try:
+                    if direction == 'en_to_zh':
+                        result = translator_en_to_zh.translate(text)
+                    else:  # zh_to_en
+                        result = translator_zh_to_en.translate(text)
+                    
+                    self.results[task_id] = result
+                except Exception as e:
+                    print(f"翻译失败 ({direction}): {e}")
+                    self.results[task_id] = text  # 失败时返回原文本
+                    
+                self.queue.task_done()
+                
+            except Exception as e:
+                print(f"翻译工作线程错误: {e}")
+    
+    def translate(self, text, direction='en_to_zh', timeout=10):
+        """提交翻译任务（异步）"""
+        if not text or not any('a' <= char.lower() <= 'z' for char in text) if direction == 'en_to_zh' else not any('\u4e00' <= char <= '\u9fff' for char in text):
+            return text
+        
+        task_id = hashlib.md5(f"{text}_{direction}".encode()).hexdigest()
+        
+        # 如果已经有结果，直接返回
+        if task_id in self.results:
+            return self.results[task_id]
+        
+        # 提交任务到队列
+        self.queue.put((task_id, text, direction))
+        
+        # 等待结果（带超时）
+        start_time = time.time()
+        while task_id not in self.results:
+            if time.time() - start_time > timeout:
+                print(f"翻译超时: {text[:50]}...")
+                return text  # 超时返回原文本
+            time.sleep(0.1)
+        
+        return self.results.get(task_id, text)
 
-# ========== 核心函数 ==========
-def get_data_counts():
-    """获取实际数据数量"""
+# 初始化翻译队列
+try:
+    from translate import Translator
+    translation_queue = TranslationQueue()
+    HAS_TRANSLATE = True
+    print("✅ translate库已成功初始化（使用队列系统）")
+except ImportError as e:
+    HAS_TRANSLATE = False
+    print(f"⚠️  translate库未安装: {e}")
+    translation_queue = None
+
+# ========== 优化翻译函数 ==========
+import time
+
+def translate_to_chinese_fast(text):
+    """快速翻译成中文（使用缓存和队列）"""
+    if not text or not isinstance(text, str):
+        return text or ""
+    
+    # 检查是否需要翻译
+    if not any('a' <= char.lower() <= 'z' for char in text):
+        return text
+    
+    # 使用翻译队列
+    if translation_queue:
+        return translation_queue.translate(text, direction='en_to_zh', timeout=5)
+    
+    # 降级到简易翻译
+    return simple_translate_to_chinese(text)
+
+def translate_to_english_fast(text):
+    """快速翻译成英文（使用缓存和队列）"""
+    if not text or not isinstance(text, str):
+        return text or ""
+    
+    # 检查是否需要翻译
+    if not any('\u4e00' <= char <= '\u9fff' for char in text):
+        return text
+    
+    # 使用翻译队列
+    if translation_queue:
+        return translation_queue.translate(text, direction='zh_to_en', timeout=5)
+    
+    # 降级到简易翻译
+    return simple_translate_to_english(text)
+
+def simple_translate_to_chinese(text):
+    """简易翻译：英文到中文（备份方案）"""
+    if not text:
+        return text
+    
+    # 关键医学术语翻译
+    medical_terms = {
+        'skin cancer': '皮肤癌',
+        'cancer': '癌症',
+        'diabetes': '糖尿病',
+        'high blood pressure': '高血压',
+        'pneumonia': '肺炎',
+        'heart disease': '心脏病',
+        'common cold': '普通感冒',
+        'basal cell carcinoma': '基底细胞癌',
+        'squamous cell carcinoma': '鳞状细胞癌',
+        'nonmelanoma': '非黑色素瘤',
+        'melanoma': '黑色素瘤',
+        'CSCC': '皮肤鳞状细胞癌',
+        'BCC': '基底细胞癌',
+    }
+    
+    result = text
+    for en, zh in medical_terms.items():
+        if en.lower() in result.lower():
+            result = re.sub(r'\b' + re.escape(en) + r'\b', zh, result, flags=re.IGNORECASE)
+    
+    return result
+
+def simple_translate_to_english(text):
+    """简易翻译：中文到英文（备份方案）"""
+    if not text:
+        return text
+    
+    medical_terms = {
+        '皮肤癌': 'skin cancer',
+        '癌症': 'cancer',
+        '糖尿病': 'diabetes',
+        '高血压': 'high blood pressure',
+        '肺炎': 'pneumonia',
+        '心脏病': 'heart disease',
+        '感冒': 'common cold',
+        '基底细胞癌': 'basal cell carcinoma',
+        '鳞状细胞癌': 'squamous cell carcinoma',
+        '非黑色素瘤': 'nonmelanoma',
+        '黑色素瘤': 'melanoma',
+    }
+    
+    result = text
+    for zh, en in medical_terms.items():
+        if zh in result:
+            result = result.replace(zh, en)
+    
+    return result
+
+def ensure_pure_chinese(text):
+    """确保文本是纯中文"""
+    if not text:
+        return text
+    
+    if any('a' <= char.lower() <= 'z' for char in text):
+        return translate_to_chinese_fast(text)
+    
+    return text
+
+def ensure_pure_english(text):
+    """确保文本是纯英文"""
+    if not text:
+        return text
+    
+    if any('\u4e00' <= char <= '\u9fff' for char in text):
+        return translate_to_english_fast(text)
+    
+    return text
+
+# ========== 数据加载函数（优化版，避免在加载时翻译） ==========
+def load_corpus_data():
+    """加载语料库数据"""
     try:
-        corpus_path = Path("data/raw/medical_corpus.json")
-        doc_count = 0
-        corpus_data = {}
-        if corpus_path.exists():
-            with open(corpus_path, 'r', encoding='utf-8') as f:
-                corpus_data = json.load(f)
-                if isinstance(corpus_data, dict) and 'context' in corpus_data:
-                    doc_count = 1
-                elif isinstance(corpus_data, list):
-                    doc_count = len(corpus_data)
-        
-        questions_path = Path("data/raw/medical_questions.json")
-        question_count = 0
-        if questions_path.exists():
-            with open(questions_path, 'r', encoding='utf-8') as f:
-                questions_data = json.load(f)
-                if isinstance(questions_data, list):
-                    question_count = len(questions_data)
-        
-        return doc_count, question_count, corpus_data
+        if CORPUS_PATH.exists():
+            with open(CORPUS_PATH, 'r', encoding='utf-8') as f:
+                corpus = json.load(f)
+            
+            if isinstance(corpus, dict) and 'context' in corpus:
+                context = corpus.get('context', '')
+                paragraphs = [p.strip() for p in context.split('\n\n') if p.strip()]
+                
+                return {
+                    'corpus_name': corpus.get('corpus_name', '医疗知识库'),
+                    'doc_count': 1,
+                    'paragraphs': paragraphs,
+                    'full_content': context
+                }
+        else:
+            print(f"语料库文件不存在: {CORPUS_PATH}")
+        return None
     except Exception as e:
-        print(f"数据加载错误: {e}")
-        return 0, 0, {}
+        print(f"加载语料库失败: {e}")
+        return None
 
-def detect_query_language(query):
-    """检测查询语言"""
-    has_chinese = bool(re.search(r'[\u4e00-\u9fff]', query))
-    has_english = bool(re.search(r'[a-zA-Z]', query))
-    
-    if has_chinese and not has_english:
-        return "chinese"
-    elif has_english and not has_chinese:
-        return "english"
-    elif has_chinese and has_english:
-        # 混合查询，以中文为主
-        return "chinese"
-    else:
-        return "unknown"
+def load_questions_data():
+    """加载问题集数据（不进行翻译，延迟翻译）"""
+    try:
+        if QUESTIONS_PATH.exists():
+            with open(QUESTIONS_PATH, 'r', encoding='utf-8') as f:
+                questions = json.load(f)
+            
+            if isinstance(questions, list):
+                question_types = defaultdict(int)
+                all_questions = []
+                
+                for q in questions:
+                    if isinstance(q, dict) and 'question' in q and 'answer' in q:
+                        q_type = q.get('question_type', '其他')
+                        question_types[q_type] += 1
+                        
+                        question_text = q.get('question', '')
+                        answer_text = q.get('answer', '')
+                        
+                        # 判断原始语言，但不立即翻译
+                        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in question_text)
+                        
+                        if has_chinese:
+                            # 原始是中文，保存原文本
+                            question_cn = question_text
+                            answer_cn = answer_text
+                            # 英文版本先设为空，需要时再翻译
+                            question_en = ""
+                            answer_en = ""
+                        else:
+                            # 原始是英文，保存原文本
+                            question_en = question_text
+                            answer_en = answer_text
+                            # 中文版本先设为空，需要时再翻译
+                            question_cn = ""
+                            answer_cn = ""
+                        
+                        all_questions.append({
+                            'question_cn': question_cn,
+                            'question_en': question_en,
+                            'answer_cn': answer_cn,
+                            'answer_en': answer_en,
+                            'type': q_type,
+                            'source': q.get('source', 'Medical'),
+                            'original_lang': 'zh' if has_chinese else 'en',
+                            'raw_question': question_text,  # 保存原始问题
+                            'raw_answer': answer_text,      # 保存原始答案
+                        })
+                
+                sample_questions = all_questions[:50] if len(all_questions) > 50 else all_questions
+                
+                return {
+                    'total_count': len(all_questions),
+                    'sample_questions': sample_questions,
+                    'question_types': dict(question_types),
+                    'all_questions': all_questions
+                }
+        else:
+            print(f"问题集文件不存在: {QUESTIONS_PATH}")
+        return None
+    except Exception as e:
+        print(f"加载问题集失败: {e}")
+        return None
 
-def translate_chinese_to_english(chinese_query):
-    """将中文查询翻译为英文搜索词"""
-    search_terms = []
-    translation_map = {}
+def get_data_counts():
+    """获取数据统计"""
+    corpus_data = load_corpus_data()
+    questions_data = load_questions_data()
     
-    # 查找医疗术语
-    for category, terms in MEDICAL_TERMS.items():
-        for chinese, english_list in terms.items():
-            if chinese in chinese_query:
-                search_terms.extend(english_list)
-                translation_map[chinese] = english_list[0]  # 取第一个翻译
+    doc_count = corpus_data['doc_count'] if corpus_data else 1
+    question_count = questions_data['total_count'] if questions_data else 0
     
-    # 如果没有找到术语，提取中文字符
-    if not search_terms:
-        chinese_words = re.findall(r'[\u4e00-\u9fff]{2,}', chinese_query)
-        search_terms = chinese_words
-    
-    return search_terms, translation_map
+    return doc_count, question_count, corpus_data, questions_data
 
-def search_chinese_query(query):
-    """中文查询处理"""
-    print(f"🔍 中文查询: '{query}'")
+# ========== 智能搜索函数（延迟翻译） ==========
+def search_in_questions(query, questions_data, answer_language='zh', top_k=5):
+    """智能搜索算法（延迟翻译）"""
+    if not questions_data or 'all_questions' not in questions_data:
+        return []
     
-    # 翻译为英文搜索词
-    search_terms, translation_map = translate_chinese_to_english(query)
-    print(f"   翻译结果: {translation_map}")
-    print(f"   搜索词: {search_terms}")
+    query = query.strip()
+    if not query:
+        return []
+    
+    # 判断查询语言
+    has_chinese = any('\u4e00' <= char <= '\u9fff' for char in query)
+    query_lang = 'zh' if has_chinese else 'en'
     
     results = []
     
-    # 在双语知识库中搜索
-    for key, knowledge in BILINGUAL_KNOWLEDGE_BASE.items():
-        match_score = 0
-        matched_terms = []
+    for q in questions_data['all_questions']:
+        score = 0
         
-        # 检查英文关键词
-        for term in search_terms:
-            if term.lower() in [kw.lower() for kw in knowledge["keywords"]]:
-                match_score += 2
-                matched_terms.append(term)
+        # 获取原始文本
+        raw_question = q.get('raw_question', '')
+        raw_answer = q.get('raw_answer', '')
+        original_lang = q.get('original_lang', 'en')
         
-        # 检查直接中文匹配
-        if any(word in query for word in knowledge["keywords"] if re.search(r'[\u4e00-\u9fff]', str(word))):
-            match_score += 3
+        # 根据查询语言进行匹配（使用原始文本）
+        if query_lang == 'zh':
+            # 中文查询
+            query_lower = query.lower()
+            if original_lang == 'zh':
+                # 原始是中文，直接匹配
+                if query_lower in raw_question.lower():
+                    score += 10
+                elif any(word in raw_question.lower() for word in query_lower.split()):
+                    score += 5
+            else:
+                # 原始是英文，翻译后匹配
+                translated_question = simple_translate_to_chinese(raw_question)
+                if query_lower in translated_question.lower():
+                    score += 8
+        else:
+            # 英文查询
+            query_lower = query.lower()
+            if original_lang == 'en':
+                # 原始是英文，直接匹配
+                if query_lower in raw_question.lower():
+                    score += 10
+                elif any(word in raw_question.lower() for word in query_lower.split()):
+                    score += 5
+            else:
+                # 原始是中文，翻译后匹配
+                translated_question = simple_translate_to_english(raw_question)
+                if query_lower in translated_question.lower():
+                    score += 8
         
-        if match_score > 0:
+        if score > 0:
+            # 根据用户选择的回答语言选择显示内容（延迟翻译）
+            if answer_language == 'en':
+                # 英文回答
+                if original_lang == 'en':
+                    display_question = ensure_pure_english(raw_question)
+                    display_answer = ensure_pure_english(raw_answer)
+                else:
+                    display_question = translate_to_english_fast(raw_question)
+                    display_answer = translate_to_english_fast(raw_answer)
+            else:
+                # 中文回答
+                if original_lang == 'zh':
+                    display_question = ensure_pure_chinese(raw_question)
+                    display_answer = ensure_pure_chinese(raw_answer)
+                else:
+                    display_question = translate_to_chinese_fast(raw_question)
+                    display_answer = translate_to_chinese_fast(raw_answer)
+            
+            confidence = min(score / 10, 0.95)
+            
+            # 翻译类型和来源
+            q_type = q.get('type', 'Medical')
+            source = q.get('source', 'Medical Database')
+            
+            if answer_language == 'zh':
+                if q_type == 'Fact Retrieval':
+                    q_type = '事实检索'
+                elif q_type == 'Medical':
+                    q_type = '医疗信息'
+                if source == 'Medical Database':
+                    source = '医疗数据库'
+            
             results.append({
-                'title': knowledge["title_cn"],
-                'content': knowledge["content_cn"],
-                'source': '医疗知识库',
-                'score': match_score,
-                'matched_terms': matched_terms,
-                'translation': translation_map
+                'display_question': display_question,
+                'display_answer': display_answer,
+                'type': q_type,
+                'source': source,
+                'confidence': confidence,
+                'original_lang': original_lang
             })
     
-    # 按匹配分数排序
-    results.sort(key=lambda x: x['score'], reverse=True)
-    return results[:3]
-
-def search_english_query(query):
-    """英文查询处理"""
-    print(f"🔍 English query: '{query}'")
+    # 排序并返回
+    results.sort(key=lambda x: x['confidence'], reverse=True)
     
-    query_lower = query.lower()
-    results = []
+    # 去重
+    unique_results = []
+    seen_questions = set()
     
-    # 在双语知识库中搜索
-    for key, knowledge in BILINGUAL_KNOWLEDGE_BASE.items():
-        match_score = 0
-        matched_terms = []
+    for result in results:
+        question_key = hashlib.md5(result['display_question'].encode()).hexdigest()
+        if question_key not in seen_questions:
+            seen_questions.add(question_key)
+            unique_results.append(result)
         
-        # 检查英文关键词匹配
-        for keyword in knowledge["keywords"]:
-            if isinstance(keyword, str) and keyword.lower() in query_lower:
-                match_score += 2
-                matched_terms.append(keyword)
-        
-        # 检查标题和内容中的匹配
-        if knowledge["title_en"].lower() in query_lower:
-            match_score += 3
-        
-        if match_score > 0:
-            results.append({
-                'title': knowledge["title_en"],
-                'content': knowledge["content_en"],
-                'source': 'Medical Knowledge Base',
-                'score': match_score,
-                'matched_terms': matched_terms
-            })
+        if len(unique_results) >= top_k:
+            break
     
-    # 按匹配分数排序
-    results.sort(key=lambda x: x['score'], reverse=True)
-    return results[:3]
+    return unique_results
 
-def generate_chinese_answer(query, search_results):
-    """生成中文回答"""
-    if not search_results:
-        return """
-        <div class='answer-container'>
-            <h4>🔍 查询结果：'{query}'</h4>
-            <div class='no-results'>
-                <p>暂时没有找到相关信息，您可以尝试：</p>
-                <ul>
-                    <li>使用更具体的医疗术语</li>
-                    <li>尝试英文查询</li>
-                    <li>参考常见问题：糖尿病、高血压、感冒等</li>
-                </ul>
-            </div>
-            <div class='medical-note'>
-                <p><strong>💡 重要提示：</strong></p>
-                <ul>
-                    <li>本系统提供的信息仅供参考</li>
-                    <li>不能替代专业医疗建议</li>
-                    <li>如有症状请及时就医</li>
-                </ul>
-            </div>
-        </div>
-        """.replace("{query}", query)
-    
-    answer_parts = []
-    answer_parts.append(f"<div class='answer-container'>")
-    answer_parts.append(f"<h4>🔍 查询结果：'{query}'</h4>")
-    
-    # 显示翻译提示
-    if search_results and 'translation' in search_results[0] and search_results[0]['translation']:
-        translation = search_results[0]['translation']
-        if translation:
-            trans_text = "，".join([f"{chi}→{eng}" for chi, eng in translation.items()])
-            answer_parts.append(f"<div class='translation-hint'>🌐 术语翻译：{trans_text}</div>")
-    
-    for i, result in enumerate(search_results, 1):
-        answer_parts.append(f"""
-        <div class='search-result'>
-            <div class='result-header'>
-                <span class='result-number'>#{i}</span>
-                <span class='result-title'>{result['title']}</span>
-                <span class='result-score'>相关度：{result['score']}</span>
-            </div>
-            <div class='result-content'>
-                <p>{result['content']}</p>
-                <p class='result-source'><strong>来源：</strong> {result['source']}</p>
-            </div>
-        </div>
-        """)
-    
-    answer_parts.append("""
-    <div class='medical-note'>
-        <p><strong>💡 重要提示：</strong></p>
-        <ul>
-            <li>本系统提供的信息仅供参考，不能替代专业医疗建议</li>
-            <li>具体诊断和治疗请咨询执业医师</li>
-            <li>如遇紧急情况，请立即拨打120或前往医院急诊</li>
-            <li>保持健康生活方式是最好的疾病预防方法</li>
-        </ul>
-    </div>
-    """)
-    answer_parts.append("</div>")
-    
-    return "\n".join(answer_parts)
-
-def generate_english_answer(query, search_results):
-    """生成英文回答"""
-    if not search_results:
-        return """
-        <div class='answer-container'>
-            <h4>🔍 Search Results: '{query}'</h4>
-            <div class='no-results'>
-                <p>No relevant information found. You can try:</p>
-                <ul>
-                    <li>Using more specific medical terms</li>
-                    <li>Trying Chinese query</li>
-                    <li>Reference common topics: diabetes, hypertension, common cold, etc.</li>
-                </ul>
-            </div>
-            <div class='medical-note'>
-                <p><strong>💡 Important Note:</strong></p>
-                <ul>
-                    <li>Information provided is for reference only</li>
-                    <li>Not a substitute for professional medical advice</li>
-                    <li>Consult a doctor for symptoms</li>
-                </ul>
-            </div>
-        </div>
-        """.replace("{query}", query)
-    
-    answer_parts = []
-    answer_parts.append(f"<div class='answer-container'>")
-    answer_parts.append(f"<h4>🔍 Search Results: '{query}'</h4>")
-    
-    for i, result in enumerate(search_results, 1):
-        # 显示匹配的关键词
-        match_info = ""
-        if 'matched_terms' in result and result['matched_terms']:
-            match_info = f"<div class='match-info'>Matching terms: {', '.join(result['matched_terms'])}</div>"
-        
-        answer_parts.append(f"""
-        <div class='search-result'>
-            <div class='result-header'>
-                <span class='result-number'>#{i}</span>
-                <span class='result-title'>{result['title']}</span>
-                <span class='result-score'>Relevance: {result['score']}</span>
-            </div>
-            {match_info}
-            <div class='result-content'>
-                <p>{result['content']}</p>
-                <p class='result-source'><strong>Source:</strong> {result['source']}</p>
-            </div>
-        </div>
-        """)
-    
-    answer_parts.append("""
-    <div class='medical-note'>
-        <p><strong>💡 Important Medical Disclaimer:</strong></p>
-        <ul>
-            <li>This information is for educational purposes only</li>
-            <li>Not a substitute for professional medical advice, diagnosis, or treatment</li>
-            <li>Always seek the advice of your physician with any medical questions</li>
-            <li>In case of emergency, call your local emergency number immediately</li>
-            <li>Maintaining a healthy lifestyle is the best prevention</li>
-        </ul>
-    </div>
-    """)
-    answer_parts.append("</div>")
-    
-    return "\n".join(answer_parts)
-
-# ========== Flask 路由 ==========
+# ========== Flask路由 ==========
 @app.route('/')
 def index():
     """主页"""
-    doc_count, question_count, _ = get_data_counts()
+    doc_count, question_count, corpus_data, questions_data = get_data_counts()
     
-    # 双语示例问题
-    sample_questions_chinese = [
-        {"text": "糖尿病的症状", "question": "糖尿病的常见症状有哪些？"},
-        {"text": "高血压预防", "question": "如何预防高血压？"},
-        {"text": "胃疼怎么办", "question": "胃疼应该怎么处理？"}
-    ]
+    sample_questions = []
+    if questions_data and 'sample_questions' in questions_data:
+        all_samples = questions_data['sample_questions'][:20]
+        if len(all_samples) >= 3:
+            sample_questions = random.sample(all_samples, 3)
+        else:
+            sample_questions = all_samples
     
-    sample_questions_english = [
-        {"text": "Diabetes symptoms", "question": "What are the symptoms of diabetes?"},
-        {"text": "Headache relief", "question": "How to relieve headache?"},
-        {"text": "Skin cancer info", "question": "Information about skin cancer"}
-    ]
+    display_questions = []
+    for i, sq in enumerate(sample_questions):
+        # 使用简易翻译显示示例问题，避免卡顿
+        question_text = sq.get('raw_question', '')
+        if sq.get('original_lang') == 'en':
+            display_text = simple_translate_to_chinese(question_text)
+        else:
+            display_text = question_text
+        
+        if len(display_text) > 40:
+            display_text = display_text[:40] + "..."
+        
+        display_questions.append({
+            'text': display_text,
+            'full_question': question_text,
+            'index': i,
+            'lang': sq.get('original_lang', 'en')
+        })
     
     return render_template('index.html',
                          doc_count=doc_count,
                          question_count=question_count,
-                         sample_questions_chinese=sample_questions_chinese,
-                         sample_questions_english=sample_questions_english)
+                         sample_questions=display_questions)
 
-@app.route('/api/query-chinese', methods=['POST'])
-def handle_chinese_query():
-    """处理中文查询"""
-    data = request.json
-    question = data.get('question', '').strip()
+@app.route('/api/query', methods=['POST'])
+def handle_query():
+    """处理查询请求"""
+    try:
+        data = request.json
+        question = data.get('question', '').strip()
+        answer_language = data.get('answer_language', 'zh')
+        
+        if not question:
+            return jsonify({'success': False, 'error': '请输入问题'})
+        
+        _, _, _, questions_data = get_data_counts()
+        
+        if not questions_data:
+            return jsonify({
+                'success': False,
+                'error': '无法加载问题数据，请检查数据文件'
+            })
+        
+        search_results = search_in_questions(
+            question, 
+            questions_data, 
+            answer_language=answer_language,
+            top_k=5
+        )
+        
+        answer_html = generate_answer_html(question, search_results, answer_language)
+        
+        result_count = len(search_results)
+        if search_results:
+            avg_confidence = sum(r.get('confidence', 0.5) for r in search_results) / result_count
+        else:
+            avg_confidence = 0
+        
+        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in question)
+        query_language = 'zh' if has_chinese else 'en'
+        
+        return jsonify({
+            'success': True,
+            'question': question,
+            'answer': answer_html,
+            'confidence': avg_confidence,
+            'result_count': result_count,
+            'query_language': query_language,
+            'answer_language': answer_language
+        })
     
-    if not question:
-        return jsonify({'success': False, 'error': '请输入问题'})
-    
-    print(f"\n=== 中文查询处理 ===")
-    print(f"问题: '{question}'")
-    
-    # 中文搜索
-    search_results = search_chinese_query(question)
-    
-    # 生成中文回答
-    answer_html = generate_chinese_answer(question, search_results)
-    
-    return jsonify({
-        'success': True,
-        'question': question,
-        'language': 'chinese',
-        'answer': answer_html,
-        'results_count': len(search_results),
-        'has_translation': bool(search_results and 'translation' in search_results[0])
-    })
+    except Exception as e:
+        print(f"查询处理错误: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'服务器错误: {str(e)}'
+        })
 
-@app.route('/api/query-english', methods=['POST'])
-def handle_english_query():
-    """处理英文查询"""
-    data = request.json
-    question = data.get('question', '').strip()
+def generate_answer_html(question, search_results, answer_language='zh'):
+    """生成回答HTML"""
+    if not search_results:
+        return f'''
+        <div class="no-results">
+            <h4>🤔 未找到相关信息</h4>
+            <p>暂时没有找到与"<strong>{question}</strong>"直接相关的医疗信息。</p>
+            <div class="suggestions">
+                <p>建议：</p>
+                <ul>
+                    <li>尝试使用更具体的医疗术语（如"糖尿病症状"、"高血压治疗"）</li>
+                    <li>检查问题是否包含拼写错误</li>
+                    <li>尝试询问常见疾病（如感冒、头痛、糖尿病等）</li>
+                    <li>您也可以用英文提问</li>
+                </ul>
+            </div>
+        </div>
+        '''
     
-    if not question:
-        return jsonify({'success': False, 'error': 'Please enter a question'})
+    html_parts = []
     
-    print(f"\n=== English Query Processing ===")
-    print(f"Question: '{question}'")
+    html_parts.append('<div class="answer-container">')
+    html_parts.append('<h4>🔍 查询结果</h4>')
+    html_parts.append(f'<p class="query-display">问题：<strong>{question}</strong></p>')
     
-    # 英文搜索
-    search_results = search_english_query(question)
+    for i, result in enumerate(search_results, 1):
+        display_question = result.get('display_question', '')
+        display_answer = result.get('display_answer', '')
+        source = result.get('source', '医疗数据库')
+        q_type = result.get('type', '医疗信息')
+        confidence = result.get('confidence', 0.7) * 100
+        
+        html_parts.append(f'''
+        <div class="search-result">
+            <div class="result-header">
+                <span class="result-number">#{i}</span>
+                <span class="result-type">{q_type}</span>
+                <span class="result-confidence">置信度: {confidence:.0f}%</span>
+            </div>
+            <div class="result-content">
+                <p><strong>相关信息:</strong> {display_question}</p>
+                <div class="answer-box">
+                    <strong>答案:</strong> {display_answer}
+                </div>
+                <p style="margin-top: 10px;"><strong>来源:</strong> <span class="source-badge">{source}</span></p>
+            </div>
+        </div>
+        ''')
     
-    # 生成英文回答
-    answer_html = generate_english_answer(question, search_results)
+    advice = '''
+    <div class="medical-advice">
+        <h5>💡 医疗建议</h5>
+        <ul>
+            <li>以上信息基于医疗数据库，仅供参考</li>
+            <li>具体症状请咨询专业医生</li>
+            <li>如遇紧急情况，请立即就医</li>
+            <li>保持健康生活方式有助于疾病预防</li>
+        </ul>
+    </div>
+    '''
     
-    return jsonify({
-        'success': True,
-        'question': question,
-        'language': 'english',
-        'answer': answer_html,
-        'results_count': len(search_results)
-    })
-
-@app.route('/api/auto-detect-query', methods=['POST'])
-def handle_auto_query():
-    """自动检测语言查询（兼容旧版）"""
-    data = request.json
-    question = data.get('question', '').strip()
-    
-    if not question:
-        return jsonify({'success': False, 'error': '请输入问题/Please enter a question'})
-    
-    # 检测语言
-    language = detect_query_language(question)
-    
-    if language == "chinese":
-        return handle_chinese_query()
-    elif language == "english":
-        return handle_english_query()
-    else:
-        # 默认用中文处理
-        return handle_chinese_query()
+    html_parts.append(advice)
+    html_parts.append('</div>')
+    return '\n'.join(html_parts)
 
 @app.route('/api/export-data')
 def export_data():
-    """导出数据为Excel文件"""
+    """导出数据为Excel"""
     try:
-        print("=== 开始导出数据 ===")
-        
-        questions_path = Path("data/raw/medical_questions.json")
-        
-        if not questions_path.exists():
-            return jsonify({'success': False, 'error': '问题集文件不存在'}), 404
-        
-        # 处理问题集
-        with open(questions_path, 'r', encoding='utf-8') as f:
-            questions = json.load(f)
-        
-        questions_list = []
-        if isinstance(questions, list):
-            questions_list = questions
-        elif isinstance(questions, dict) and 'questions' in questions:
-            questions_list = questions['questions']
-        else:
-            questions_list = [questions]
-        
-        questions_data = []
-        for i, q in enumerate(questions_list):
-            questions_data.append({
-                'Index': i + 1,
-                'ID': q.get('id', f'Q{i+1}'),
-                'Question': q.get('question', ''),
-                'Answer': q.get('answer', ''),
-                'Question Type': q.get('question_type', ''),
-                'Source': q.get('source', '')
-            })
-        
-        df_questions = pd.DataFrame(questions_data)
-        
-        # 添加双语知识库
-        knowledge_data = []
-        for key, knowledge in BILINGUAL_KNOWLEDGE_BASE.items():
-            knowledge_data.append({
-                'Topic': key,
-                'Title (EN)': knowledge['title_en'],
-                'Title (CN)': knowledge['title_cn'],
-                'Keywords': ', '.join(knowledge['keywords']),
-                'Content Preview (EN)': knowledge['content_en'][:200] + '...',
-                'Content Preview (CN)': knowledge['content_cn'][:200] + '...'
-            })
-        
-        df_knowledge = pd.DataFrame(knowledge_data)
-        
-        # 创建Excel文件
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        corpus_data = load_corpus_data()
+        questions_data = load_questions_data()
         
         with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
             with pd.ExcelWriter(tmp.name, engine='openpyxl') as writer:
-                # 写入问题集
-                df_questions.to_excel(writer, sheet_name=f'Questions ({len(df_questions)})', index=False)
+                if corpus_data and 'paragraphs' in corpus_data:
+                    corpus_df = pd.DataFrame({
+                        'Paragraph ID': [f'P{i+1:03d}' for i in range(len(corpus_data['paragraphs']))],
+                        'Content': corpus_data['paragraphs'][:100],
+                        'Character Count': [len(p) for p in corpus_data['paragraphs'][:100]]
+                    })
+                    corpus_df.to_excel(writer, sheet_name='Corpus Content', index=False)
                 
-                # 写入知识库
-                df_knowledge.to_excel(writer, sheet_name='Medical Knowledge', index=False)
+                if questions_data and 'sample_questions' in questions_data:
+                    questions_list = []
+                    for i, q in enumerate(questions_data['sample_questions'][:200]):
+                        questions_list.append({
+                            'No.': i+1,
+                            'Question (CN)': q.get('question_cn', ''),
+                            'Question (EN)': q.get('question_en', ''),
+                            'Answer (CN)': q.get('answer_cn', '')[:200] if q.get('answer_cn') else '',
+                            'Answer (EN)': q.get('answer_en', '')[:200] if q.get('answer_en') else '',
+                            'Type': q.get('type', 'Unknown'),
+                            'Source': q.get('source', 'Unknown')
+                        })
+                    
+                    questions_df = pd.DataFrame(questions_list)
+                    questions_df.to_excel(writer, sheet_name='Question Samples', index=False)
                 
-                # 数据统计
-                stats_data = {
-                    'Category': ['Total Questions', 'Medical Topics', 'Export Time'],
-                    'Value': [len(df_questions), len(df_knowledge), datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
-                }
-                df_stats = pd.DataFrame(stats_data)
-                df_stats.to_excel(writer, sheet_name='Statistics', index=False)
+                stats_data = [
+                    {'Item': 'Corpus', 'Value': corpus_data['doc_count'] if corpus_data else 1, 'Description': 'Number of documents'},
+                    {'Item': 'Question Set', 'Value': questions_data['total_count'] if questions_data else 0, 'Description': 'Total questions'},
+                ]
+                
+                stats_df = pd.DataFrame(stats_data)
+                stats_df.to_excel(writer, sheet_name='Statistics', index=False)
             
             tmp_path = tmp.name
-        
-        filename = f'medical_data_{timestamp}.xlsx'
         
         return send_file(
             tmp_path,
             as_attachment=True,
-            download_name=filename,
+            download_name='Medical_RAG_System_Data.xlsx',
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
         
     except Exception as e:
-        print(f"导出失败: {e}")
-        return jsonify({'success': False, 'error': f'Export failed: {str(e)}'}), 500
+        return jsonify({'success': False, 'error': str(e)})
 
-@app.route('/api/system-info')
-def system_info():
-    """获取系统信息"""
-    doc_count, question_count, _ = get_data_counts()
+@app.route('/api/data-stats')
+def data_stats():
+    """获取数据统计API"""
+    doc_count, question_count, corpus_data, questions_data = get_data_counts()
     
-    return jsonify({
-        'success': True,
-        'system': {
-            'name': 'Medical RAG System (Bilingual)',
-            'version': '2.0',
-            'languages': ['Chinese', 'English']
+    stats = {
+        'corpus': {
+            'document_count': doc_count,
+            'corpus_name': corpus_data.get('corpus_name', '医疗知识库') if corpus_data else 'Unknown',
+            'has_data': corpus_data is not None
         },
-        'data': {
-            'corpus_documents': doc_count,
-            'question_set': question_count,
-            'knowledge_topics': len(BILINGUAL_KNOWLEDGE_BASE)
-        },
-        'endpoints': {
-            'chinese_query': '/api/query-chinese',
-            'english_query': '/api/query-english',
-            'auto_query': '/api/auto-detect-query',
-            'export_data': '/api/export-data'
+        'questions': {
+            'total_count': question_count,
+            'type_count': len(questions_data.get('question_types', {})) if questions_data else 0,
+            'has_data': questions_data is not None
         }
-    })
+    }
+    
+    return jsonify({'success': True, 'data': stats})
 
-# ========== 主程序 ==========
 if __name__ == '__main__':
     print("=" * 60)
-    print("🏥 医疗RAG系统 (中英文双查询版)")
-    print("=" * 60)
-    print("🎯 核心功能:")
-    print("  • 独立中文查询接口: /api/query-chinese")
-    print("  • 独立英文查询接口: /api/query-english")
-    print("  • 智能医疗术语翻译")
-    print("  • 双语知识库 (6个核心医疗主题)")
-    print("  • 完整数据导出功能")
-    print("")
-    print("🌐 访问地址: http://localhost:5000")
-    print("📊 系统信息: http://localhost:5000/api/system-info")
-    print("📥 数据导出: http://localhost:5000/api/export-data")
+    print("🏥 双语医疗RAG问答系统 (优化版，解决卡顿问题)")
     print("=" * 60)
     
-    # 确保templates文件夹存在
+    print("📂 检查数据文件...")
+    if CORPUS_PATH.exists():
+        print(f"   ✓ 语料库文件: {CORPUS_PATH}")
+    else:
+        print(f"   ✗ 语料库文件不存在: {CORPUS_PATH}")
+        print(f"     请将 medical_corpus.json 放置在: {CORPUS_PATH}")
+    
+    if QUESTIONS_PATH.exists():
+        print(f"   ✓ 问题集文件: {QUESTIONS_PATH}")
+    else:
+        print(f"   ✗ 问题集文件不存在: {QUESTIONS_PATH}")
+        print(f"     请将 medical_questions.json 放置在: {QUESTIONS_PATH}")
+    
+    doc_count, question_count, _, _ = get_data_counts()
+    
+    print(f"\n📊 数据统计:")
+    print(f"   语料库: {doc_count} 篇文档")
+    print(f"   问题集: {question_count} 个问题")
+    
+    print(f"\n🌐 访问地址: http://localhost:5000")
+    print(f"\n⚡ 系统特性:")
+    print(f"   • 支持中英文任意语言提问")
+    print(f"   • 可选择中文或英文回答")
+    print(f"   • 使用translate库进行高质量翻译")
+    print(f"   • 智能关键词匹配")
+    print(f"   • 数据导出功能")
+    print(f"   • 优化性能，避免卡顿")
+    
+    print("\n🎯 使用说明:")
+    print(f"   1. 在输入框中用中文或英文提问")
+    print(f"   2. 选择想要的回答语言（中文/英文）")
+    print(f"   3. 系统会自动匹配最相关的问题和答案")
+    print(f"   4. 可以点击'示例问题'快速测试")
+    
+    print("=" * 60)
+    
+    # 等待翻译队列初始化
+    time.sleep(1)
+    
     os.makedirs('templates', exist_ok=True)
-    
-    # 检查依赖
-    try:
-        import pandas
-        import openpyxl
-        print("✅ 依赖检查通过")
-    except ImportError as e:
-        print(f"⚠️  缺少依赖: {e}")
-        print("请运行: pip install pandas openpyxl")
     
     app.run(debug=True, host='0.0.0.0', port=5000)
