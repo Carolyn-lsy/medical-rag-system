@@ -35,6 +35,14 @@ RAG_CONFIG = {
 try:
     from sentence_transformers import SentenceTransformer
     import numpy as np
+    try:
+        import faiss
+        HAS_FAISS = True
+    except ImportError:
+        import subprocess, sys
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'faiss-cpu'])
+        import faiss
+        HAS_FAISS = True
     
     # 初始化嵌入模型
     print("🔄 正在加载嵌入模型...")
@@ -45,8 +53,10 @@ try:
     vector_store = {
         'corpus_chunks': [],
         'corpus_embeddings': None,
+        'corpus_faiss_index': None,
         'question_embeddings': None,
-        'questions': []
+        'questions': [],
+        'question_faiss_index': None
     }
     
     HAS_EMBEDDING = True
@@ -211,70 +221,81 @@ def compute_embeddings(texts: List[str]) -> np.ndarray:
         return None
 
 def build_vector_store(corpus_data: Dict, questions_data: Dict):
-    """构建向量存储"""
+    """构建向量存储（含faiss索引）"""
     if not HAS_EMBEDDING:
         return
-    
     print("🔄 正在构建向量存储...")
-    
     # 处理语料库
     if corpus_data:
         corpus_chunks = create_corpus_chunks(corpus_data)
         if corpus_chunks:
             chunk_texts = [chunk['text'] for chunk in corpus_chunks]
             corpus_embeddings = compute_embeddings(chunk_texts)
-            
             vector_store['corpus_chunks'] = corpus_chunks
             vector_store['corpus_embeddings'] = corpus_embeddings
+            # 构建faiss索引
+            if HAS_FAISS and corpus_embeddings is not None:
+                dim = corpus_embeddings.shape[1]
+                index = faiss.IndexFlatL2(dim)
+                index.add(np.array(corpus_embeddings, dtype=np.float32))
+                vector_store['corpus_faiss_index'] = index
             print(f"   ✓ 语料库向量: {len(corpus_chunks)} chunks")
-    
     # 处理问题
     if questions_data and 'all_questions' in questions_data:
         questions = []
         for q in questions_data['all_questions']:
-            # 使用问题和答案的组合作为检索文本
             question_text = q.get('raw_question', '')
             answer_text = q.get('raw_answer', '')
             combined_text = f"问题: {question_text}\n答案: {answer_text}"
             questions.append(combined_text)
-        
         if questions:
             question_embeddings = compute_embeddings(questions)
             vector_store['questions'] = questions_data['all_questions']
             vector_store['question_embeddings'] = question_embeddings
+            # 构建faiss索引
+            if HAS_FAISS and question_embeddings is not None:
+                dim = question_embeddings.shape[1]
+                index = faiss.IndexFlatL2(dim)
+                index.add(np.array(question_embeddings, dtype=np.float32))
+                vector_store['question_faiss_index'] = index
             print(f"   ✓ 问题向量: {len(questions)} 个问题")
-    
     print("✅ 向量存储构建完成")
 
 # ========== 检索函数 ==========
 def semantic_search(query: str, embeddings: np.ndarray, texts: List[Dict], top_k: int = 3) -> List[Dict]:
-    """语义搜索"""
+    """语义搜索（faiss加速）"""
     if not HAS_EMBEDDING or embeddings is None:
         return []
-    
     try:
-        # 计算查询的嵌入
         query_embedding = embedding_model.encode([query])[0]
-        
-        # 计算相似度（余弦相似度）
-        similarities = np.dot(embeddings, query_embedding) / (
-            np.linalg.norm(embeddings, axis=1) * np.linalg.norm(query_embedding)
-        )
-        
-        # 获取top_k结果
-        top_indices = np.argsort(similarities)[-top_k:][::-1]
-        
-        results = []
-        for idx in top_indices:
-            if idx < len(texts):
-                results.append({
-                    'text': texts[idx]['text'] if isinstance(texts[idx], dict) else texts[idx],
-                    'metadata': texts[idx] if isinstance(texts[idx], dict) else {},
-                    'similarity': float(similarities[idx]),
-                    'source': 'semantic_search'
-                })
-        
-        return results
+        if HAS_FAISS and vector_store.get('corpus_faiss_index') is not None:
+            D, I = vector_store['corpus_faiss_index'].search(np.array([query_embedding], dtype=np.float32), top_k)
+            results = []
+            for idx, dist in zip(I[0], D[0]):
+                if idx < len(texts):
+                    results.append({
+                        'text': texts[idx]['text'] if isinstance(texts[idx], dict) else texts[idx],
+                        'metadata': texts[idx] if isinstance(texts[idx], dict) else {},
+                        'similarity': float(-dist),
+                        'source': 'semantic_search'
+                    })
+            return results
+        else:
+            # fallback: numpy
+            similarities = np.dot(embeddings, query_embedding) / (
+                np.linalg.norm(embeddings, axis=1) * np.linalg.norm(query_embedding)
+            )
+            top_indices = np.argsort(similarities)[-top_k:][::-1]
+            results = []
+            for idx in top_indices:
+                if idx < len(texts):
+                    results.append({
+                        'text': texts[idx]['text'] if isinstance(texts[idx], dict) else texts[idx],
+                        'metadata': texts[idx] if isinstance(texts[idx], dict) else {},
+                        'similarity': float(similarities[idx]),
+                        'source': 'semantic_search'
+                    })
+            return results
     except Exception as e:
         print(f"语义搜索失败: {e}")
         return []
@@ -623,7 +644,6 @@ def ensure_pure_english(text):
     
     return text
 
-# ========== 数据加载函数（优化版，避免在加载时翻译） ==========
 def load_corpus_data():
     """加载语料库数据"""
     try:
@@ -714,15 +734,33 @@ def load_questions_data():
 
 def get_data_counts():
     """获取数据统计"""
-    corpus_data = load_corpus_data()
-    questions_data = load_questions_data()
-    
+    global GLOBAL_CORPUS_DATA, GLOBAL_QUESTIONS_DATA
+    corpus_data = GLOBAL_CORPUS_DATA
+    questions_data = GLOBAL_QUESTIONS_DATA
     doc_count = corpus_data['doc_count'] if corpus_data else 1
     question_count = questions_data['total_count'] if questions_data else 0
-    
     return doc_count, question_count, corpus_data, questions_data
 
 # ========== 智能搜索函数（延迟翻译） ==========
+# 全局变量用于缓存数据和向量存储
+GLOBAL_CORPUS_DATA = None
+GLOBAL_QUESTIONS_DATA = None
+GLOBAL_VECTOR_STORE_READY = False
+
+def initialize_data_and_vectors():
+    """启动时加载数据和构建向量存储，只运行一次"""
+    global GLOBAL_CORPUS_DATA, GLOBAL_QUESTIONS_DATA, GLOBAL_VECTOR_STORE_READY
+    GLOBAL_CORPUS_DATA = load_corpus_data()
+    GLOBAL_QUESTIONS_DATA = load_questions_data()
+    if HAS_EMBEDDING and GLOBAL_CORPUS_DATA and GLOBAL_QUESTIONS_DATA:
+        build_vector_store(GLOBAL_CORPUS_DATA, GLOBAL_QUESTIONS_DATA)
+        GLOBAL_VECTOR_STORE_READY = True
+    else:
+        GLOBAL_VECTOR_STORE_READY = False
+
+# 可选：暴露一个刷新接口（如有需要可手动刷新数据和向量）
+def refresh_data_and_vectors():
+    initialize_data_and_vectors()
 def search_in_questions(query, questions_data, answer_language='zh', top_k=5):
     """智能搜索算法（延迟翻译）"""
     if not questions_data or 'all_questions' not in questions_data:
@@ -836,16 +874,11 @@ def search_in_questions(query, questions_data, answer_language='zh', top_k=5):
     
     return unique_results
 
-# ========== Flask路由 ==========
+    # ...existing code...
 @app.route('/')
 def index():
     """主页"""
     doc_count, question_count, corpus_data, questions_data = get_data_counts()
-    
-    # 初始化向量存储
-    if HAS_EMBEDDING and corpus_data and questions_data:
-        build_vector_store(corpus_data, questions_data)
-    
     sample_questions = []
     if questions_data and 'sample_questions' in questions_data:
         all_samples = questions_data['sample_questions'][:20]
@@ -853,26 +886,21 @@ def index():
             sample_questions = random.sample(all_samples, 3)
         else:
             sample_questions = all_samples
-    
     display_questions = []
     for i, sq in enumerate(sample_questions):
-        # 使用简易翻译显示示例问题，避免卡顿
         question_text = sq.get('raw_question', '')
         if sq.get('original_lang') == 'en':
             display_text = simple_translate_to_chinese(question_text)
         else:
             display_text = question_text
-        
         if len(display_text) > 40:
             display_text = display_text[:40] + "..."
-        
         display_questions.append({
             'text': display_text,
             'full_question': question_text,
             'index': i,
             'lang': sq.get('original_lang', 'en')
         })
-    
     return render_template('index.html',
                          doc_count=doc_count,
                          question_count=question_count,
@@ -1041,7 +1069,7 @@ def generate_rag_answer_html(question, rag_result, answer_language='zh'):
             <span class="rag-metric"><strong>置信度:</strong> {confidence:.0f}%</span>
             <span class="rag-metric"><strong>检索文档:</strong> {len(source_documents)} 个</span>
             <span class="rag-metric"><strong>检索时间:</strong> {timing.get('retrieval', 'N/A')}</span>
-            <span class="rag-metric"><strong>生成时间:</strong> {timing.get('generation', 'N/A')}</span>
+            <span class="rag-metric"><stron.g>生成时间:</strong> {timing.get('generation', 'N/A')}</span>
         </div>
     </div>
     ''')
@@ -1195,36 +1223,29 @@ if __name__ == '__main__':
     print("=" * 60)
     print("🧠 双语医疗RAG问答系统 (RAG增强版)")
     print("=" * 60)
-    
     print("📂 检查数据文件...")
     if CORPUS_PATH.exists():
         print(f"   ✓ 语料库文件: {CORPUS_PATH}")
     else:
         print(f"   ✗ 语料库文件不存在: {CORPUS_PATH}")
         print(f"     请将 medical_corpus.json 放置在: {CORPUS_PATH}")
-    
     if QUESTIONS_PATH.exists():
         print(f"   ✓ 问题集文件: {QUESTIONS_PATH}")
     else:
         print(f"   ✗ 问题集文件不存在: {QUESTIONS_PATH}")
         print(f"     请将 medical_questions.json 放置在: {QUESTIONS_PATH}")
-    
-    doc_count, question_count, corpus_data, questions_data = get_data_counts()
-    
+    # 启动时全局加载数据和向量
+    initialize_data_and_vectors()
+    doc_count, question_count, _, _ = get_data_counts()
     print(f"\n📊 数据统计:")
     print(f"   语料库: {doc_count} 篇文档")
     print(f"   问题集: {question_count} 个问题")
-    
-    # 初始化RAG系统
-    if HAS_EMBEDDING and corpus_data and questions_data:
-        print(f"\n🔧 正在初始化RAG系统...")
-        build_vector_store(corpus_data, questions_data)
-        print(f"   ✓ RAG系统已就绪")
+    if GLOBAL_VECTOR_STORE_READY:
+        print(f"\n🔧 RAG系统已就绪")
     else:
         print(f"\n⚠️  RAG系统未启用或数据不完整")
         if not HAS_EMBEDDING:
             print(f"   请安装: pip install sentence-transformers")
-    
     print(f"\n🌐 访问地址: http://localhost:5000")
     print(f"\n⚡ 系统特性:")
     print(f"   • 支持中英文任意语言提问")
@@ -1233,19 +1254,13 @@ if __name__ == '__main__':
     print(f"   • 混合搜索（语义+关键词）")
     print(f"   • 智能答案生成")
     print(f"   • 数据导出功能")
-    
     print("\n🎯 使用说明:")
     print(f"   1. 在输入框中用中文或英文提问")
     print(f"   2. 选择想要的回答语言（中文/英文）")
     print(f"   3. 系统会使用RAG智能检索相关信息")
     print(f"   4. 可以点击'示例问题'快速测试")
     print(f"   5. 可在前端选择启用/禁用RAG功能")
-    
     print("=" * 60)
-    
-    # 等待翻译队列初始化
     time.sleep(1)
-    
     os.makedirs('templates', exist_ok=True)
-    
     app.run(debug=True, host='0.0.0.0', port=5000)
